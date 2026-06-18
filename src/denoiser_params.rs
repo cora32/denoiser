@@ -5,6 +5,7 @@ pub struct DenoiserParams {
     pub delta: i32,
     pub erase_k: u8,
     pub dilate_k: u8,
+    pub threshold: u8,
 }
 
 impl Default for DenoiserParams {
@@ -15,6 +16,7 @@ impl Default for DenoiserParams {
             delta: 10,
             erase_k: 3,
             dilate_k: 1,
+            threshold: 1,
         }
     }
 }
