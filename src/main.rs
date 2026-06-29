@@ -298,17 +298,96 @@ impl eframe::App for DenoiserApp {
                             };
 
                             ui.end_row();
+
+                            ui.add(egui::Label::new("inpaint_radius"));
+                            if ui
+                                .add(
+                                    egui::DragValue::new(&mut self.params.inpaint_radius)
+                                        .range(0.0..=99999.0)
+                                        .speed(0.1),
+                                )
+                                .changed()
+                            {
+                                self.denoise();
+                            };
+
+                            ui.end_row();
+
+                            ui.add(egui::Label::new("Horizontal line thickness"));
+                            if ui
+                                .add(
+                                    egui::DragValue::new(&mut self.params.hl_thickness)
+                                        .range(1..=10)
+                                        .speed(1),
+                                )
+                                .changed()
+                            {
+                                self.denoise();
+                            };
+
+                            ui.add(egui::Label::new("Horizontal line step"));
+                            if ui
+                                .add(
+                                    egui::DragValue::new(&mut self.params.hl_step)
+                                        .range(1..=10)
+                                        .speed(1),
+                                )
+                                .changed()
+                            {
+                                self.denoise();
+                            };
+
+                            ui.end_row();
+
+                            ui.add(egui::Label::new("Vertical line thickness"));
+                            if ui
+                                .add(
+                                    egui::DragValue::new(&mut self.params.vl_thickness)
+                                        .range(1..=10)
+                                        .speed(1),
+                                )
+                                .changed()
+                            {
+                                self.denoise();
+                            };
+
+                            ui.add(egui::Label::new("Vertical line step"));
+                            if ui
+                                .add(
+                                    egui::DragValue::new(&mut self.params.vl_step)
+                                        .range(1..=10)
+                                        .speed(1),
+                                )
+                                .changed()
+                            {
+                                self.denoise();
+                            };
+
+                            ui.end_row();
                         });
                 });
 
                 ui.add_space(20.0);
-                // Button
+                // Buttons
                 let btn = egui::Button::new(egui::RichText::new("Denoise").size(20.0));
                 ui.vertical_centered(|ui| {
                     if ui.add(btn).clicked() {
                         self.denoise();
                     }
                 });
+                ui.add_space(10.0);
+                let btn = egui::Button::new(egui::RichText::new("OCR").size(20.0));
+                ui.vertical_centered(|ui| {
+                    if ui.add(btn).clicked() {
+                        self.ocr();
+                    }
+                });
+
+                if let Ok(lock) = self.ocr_worker.text.lock() {
+                    if let Some(text) = lock.clone() {
+                        ui.label(text);
+                    }
+                }
             });
         });
     }
@@ -321,7 +400,7 @@ async fn main() {
         ..Default::default()
     };
 
-    let path = r"D:\Main3\captcha.png".to_string();
+    let path = r"captcha.png".to_string();
 
     let _ = eframe::run_native(
         "Denoiser",

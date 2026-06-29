@@ -5,9 +5,13 @@ use image::{DynamicImage, GrayImage, Luma, imageops};
 use image::{GenericImageView, io::Reader as ImageReader};
 use image::{ImageBuffer, ImageFormat};
 use image::{Rgb, RgbImage};
+use image::{Rgba, load_from_memory};
 use imageproc::contrast::adaptive_threshold;
 use imageproc::distance_transform::Norm;
+use imageproc::drawing::draw_filled_rect_mut;
+use imageproc::drawing::draw_line_segment_mut;
 use imageproc::morphology::{dilate, erode};
+use imageproc::rect::Rect;
 use opencv::photo;
 use opencv::prelude::*;
 use opencv::{Result, core, imgcodecs, imgproc, prelude::*, types};
@@ -17,6 +21,7 @@ use opencv::{
     prelude::*,
 };
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use std::fs;
 use std::io::Cursor;
@@ -24,7 +29,7 @@ use std::io::Read;
 use std::sync::mpsc;
 use std::{default, hint};
 
-use crate::ocr_wrapper::{OcrJob, OcrWorker, OcrWrapper};
+use crate::ocr_wrapper::{OcrJob, OcrOutput, OcrWorker};
 use crate::utils;
 use crate::{denoiser_params, ocr_wrapper};
 
@@ -41,21 +46,20 @@ pub struct DenoiserApp {
     pub rx_density: mpsc::Receiver<Vec<u8>>,
     pub tx_lines: mpsc::Sender<ColorImage>,
     pub rx_lines: mpsc::Receiver<ColorImage>,
-    pub tx_text: mpsc::Sender<Vec<u8>>,
-    pub rx_text: mpsc::Receiver<Vec<u8>>,
     pub texture_orig: Option<egui::TextureHandle>,
     pub texture_denoised: Option<egui::TextureHandle>,
     pub texture_denity: Option<egui::TextureHandle>,
     pub texture_lines: Option<egui::TextureHandle>,
     pub params: DenoiserParams,
     pub ocr_worker: Arc<OcrWorker>,
+    pub result_holder: Arc<Mutex<Option<Vec<u8>>>>,
 }
 
 impl Default for DenoiserApp {
     fn default() -> Self {
         let (tx_orig, rx_orig) = mpsc::channel();
         let (tx_denoised, rx_denoised) = mpsc::channel();
-        let (tx_text, rx_text) = mpsc::channel();
+        // let (tx_text, rx_text) = mpsc::channel();
         let (tx_density, rx_density) = mpsc::channel();
         let (tx_lines, rx_lines) = mpsc::channel();
         let ocr_worker = Arc::new(OcrWorker::new());
@@ -69,14 +73,13 @@ impl Default for DenoiserApp {
             rx_density,
             tx_lines,
             rx_lines,
-            tx_text,
-            rx_text,
             texture_orig: None,
             texture_denoised: None,
             texture_denity: None,
             texture_lines: None,
             params: DenoiserParams::default(),
             ocr_worker: ocr_worker,
+            result_holder: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -241,9 +244,7 @@ impl DenoiserApp {
     }
 
     fn detect_lines(
-        path: String,
-        height: i32,
-        width: i32,
+        png_bytes: Vec<u8>,
         //
         rho: f64,
         theta: f64,
@@ -255,9 +256,11 @@ impl DenoiserApp {
         high_threshold: f64,
         aperture: i32,
         l2_gradient: bool,
+        inpaint_radius: f64,
     ) -> (ColorImage, Vec<u8>) {
         // 1. Read the PNG file bytes (Compressed)
-        let png_bytes = fs::read(path).expect("Unable to read file");
+        // let png_bytes = fs::read(path).expect("Unable to read file");
+        // let resized = Self::resize(&png_bytes, 400, 200);
 
         // 2. Decode the bytes into a raw pixel Mat (BGR or Grayscale)
         let buf = Vector::<u8>::from_iter(png_bytes);
@@ -270,23 +273,23 @@ impl DenoiserApp {
 
         println!("low_threshold: {}", low_threshold);
 
-        let mut blurred = core::Mat::default();
+        // let mut blurred = core::Mat::default();
 
-        imgproc::gaussian_blur(
-            &src,
-            &mut blurred,
-            opencv::core::Size::new(3, 3),
-            0.0,
-            0.0,
-            opencv::core::BORDER_DEFAULT,
-            opencv::core::AlgorithmHint::ALGO_HINT_DEFAULT,
-        )
-        .unwrap();
+        // imgproc::gaussian_blur(
+        //     &src,
+        //     &mut blurred,
+        //     opencv::core::Size::new(5, 5),
+        //     10.0,
+        //     10.0,
+        //     opencv::core::BORDER_DEFAULT,
+        //     opencv::core::AlgorithmHint::ALGO_HINT_DEFAULT,
+        // )
+        // .unwrap();
 
         // 3. Create a binary edge map (HoughLinesP requires this)
         let mut edges = core::Mat::default();
         imgproc::canny(
-            &blurred,
+            &src,
             &mut edges,
             low_threshold,  // Low threshold
             high_threshold, // High threshold
@@ -310,7 +313,7 @@ impl DenoiserApp {
 
         // Get only horizontal lines
         let mut horizontal_lines = Vec::<opencv::core::Vec4i>::new();
-        let mut mask = Mat::zeros(height, width, opencv::core::CV_8UC1)
+        let mut mask = Mat::zeros(src.rows(), src.cols(), opencv::core::CV_8UC1)
             .unwrap()
             .to_mat()
             .unwrap();
@@ -344,12 +347,91 @@ impl DenoiserApp {
         println!("Inpainting...");
         let mut result = Mat::default();
 
-        photo::inpaint(&src, &mask, &mut result, 3.0, photo::INPAINT_TELEA).unwrap();
+        println!("src size: {:?}", src.size().unwrap());
+        println!("mask size: {:?}", mask.size().unwrap());
+        println!("result size: {:?}", result.size().unwrap());
+
+        photo::inpaint(
+            &src,
+            &mask,
+            &mut result,
+            inpaint_radius,
+            photo::INPAINT_TELEA,
+        )
+        .unwrap();
 
         (
             mat_to_color_image(&mask).unwrap(),
             mat_to_png(&result).unwrap(),
         )
+    }
+
+    fn resize(bytes: &[u8], new_width: u32, new_height: u32) -> Vec<u8> {
+        let img = load_from_memory(bytes).expect("Failed to load image from memory");
+        let resized = img.resize(new_width, new_height, imageops::FilterType::Lanczos3);
+        let mut buffer = Cursor::new(Vec::new());
+        resized
+            .write_to(&mut buffer, ImageFormat::Png)
+            .expect("Failed to write to buffer");
+
+        buffer.into_inner()
+    }
+
+    fn add_white_lines(
+        bytes: &Vec<u8>,
+        hl_thickness: u32,
+        hl_step: i32,
+        vl_thickness: u32,
+        vl_step: i32,
+    ) -> DynamicImage {
+        let mut img = load_from_memory(bytes)
+            .expect("Failed to decode image")
+            .into_rgba8();
+
+        let color = Rgba([255, 255, 255, 255]);
+        let (width, height) = img.dimensions();
+
+        // Horizontal lines
+        for y in (0..height).step_by(hl_step as usize) {
+            // let start = (0.0, y as f32);
+            // let end = (width as f32, y as f32);
+
+            let rect = Rect::at(0, y as i32).of_size(width, hl_thickness);
+
+            //draw_line_segment_mut(&mut img, start, end, color);
+            draw_filled_rect_mut(&mut img, rect, color);
+        }
+
+        // Horizontal lines
+        for y in (0..height).step_by(hl_step as usize) {
+            // let start = (0.0, y as f32);
+            // let end = (width as f32, y as f32);
+
+            let rect = Rect::at(0, y as i32).of_size(width, hl_thickness);
+
+            //draw_line_segment_mut(&mut img, start, end, color);
+            draw_filled_rect_mut(&mut img, rect, color);
+        }
+
+        // Vertical lines
+        for x in (0..width).step_by(vl_step as usize) {
+            let rect = Rect::at(x as i32, 0).of_size(vl_thickness, height);
+
+            //draw_line_segment_mut(&mut img, start, end, color);
+            draw_filled_rect_mut(&mut img, rect, color);
+        }
+
+        DynamicImage::ImageRgba8(img)
+    }
+
+    fn img_to_bytes(img: &DynamicImage) -> Vec<u8> {
+        let mut result_bytes = Vec::new();
+        let mut cursor = Cursor::new(&mut result_bytes);
+
+        img.write_to(&mut cursor, image::ImageFormat::Png)
+            .expect("Failed to encode PNG");
+
+        result_bytes
     }
 
     pub fn denoise(&mut self) {
@@ -358,26 +440,38 @@ impl DenoiserApp {
         let tx_density = self.tx_density.clone();
         let tx_lines = self.tx_lines.clone();
         let params = self.params.clone();
-        let ocr_worker_submitter = self.ocr_worker.tx.clone();
+        let result_holder_handler = self.result_holder.clone();
 
         println!("Loading {}", params.path);
 
         tokio::spawn(async move {
             let bytes = fs::read(params.path.clone()).expect("Unable to read file");
 
-            tx_orig.send(bytes.clone()).unwrap();
+            let resized = Self::resize(&bytes.clone(), 400, 200);
+
+            tx_orig.send(resized.clone()).unwrap();
+
+            let white_lines = Self::add_white_lines(
+                &resized,
+                params.hl_thickness,
+                params.hl_step,
+                params.vl_thickness,
+                params.vl_step,
+            );
 
             // Getting density
-            let (bit_map, density_bytes, threshold, height, width) =
-                Self::analyze_density(&bytes, params.threshold);
-            tx_density.send(density_bytes).unwrap();
+            // let (bit_map, density_bytes, threshold, height, width) =
+            //     Self::analyze_density(&resized, params.threshold);
+            // tx_density.send(density_bytes).unwrap();
+
+            // println!("Width: {} Height: {}", width, height);
+
+            let bytes = Self::img_to_bytes(&white_lines);
 
             //Line detection
             println!("Detecting lines...");
             let (lines_mask, inpainted) = Self::detect_lines(
-                params.path,
-                height,
-                width,
+                bytes.clone(),
                 //
                 params.rho,
                 params.theta,
@@ -389,29 +483,45 @@ impl DenoiserApp {
                 params.high_threshold,
                 params.aperture,
                 params.l2_gradient,
+                params.inpaint_radius,
             );
             // let img_with_lines_bytes = draw_lines();
             tx_lines.send(lines_mask).unwrap();
 
             // Denoising
-            println!("Denoising...");
-            let denoised_bytes = Self::clean_captcha(
-                &inpainted.clone(),
-                params.block,
-                params.delta,
-                params.erase_k,
-                params.dilate_k,
-                &bit_map,
-                params.threshold,
-            );
+            // println!("Denoising...");
+            // let denoised_bytes = Self::clean_captcha(
+            //     &inpainted.clone(),
+            //     params.block,
+            //     params.delta,
+            //     params.erase_k,
+            //     params.dilate_k,
+            //     &bit_map,
+            //     params.threshold,
+            // );
             tx_denoised.send(inpainted.clone()).unwrap();
 
-            ocr_worker_submitter
-                .send(OcrJob { bytes: inpainted })
-                .unwrap();
+            if let Ok(mut lock) = result_holder_handler.lock() {
+                *lock = Some(inpainted.clone());
+            }
+
+            tx_density.send(bytes.clone()).unwrap();
 
             println!("Done");
         });
+    }
+
+    pub fn ocr(&mut self) {
+        if let Ok(lock) = self.result_holder.lock() {
+            if let Some(bytes) = &*lock {
+                self.ocr_worker
+                    .tx
+                    .send(OcrJob {
+                        bytes: (*bytes).clone(),
+                    })
+                    .unwrap();
+            }
+        }
     }
 
     pub fn load_texture_from_bytes(

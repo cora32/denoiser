@@ -17,6 +17,12 @@ pub struct DenoiserParams {
     pub high_threshold: f64,
     pub aperture: i32,
     pub l2_gradient: bool,
+    pub inpaint_radius: f64,
+    //
+    pub hl_thickness: u32,
+    pub hl_step: i32,
+    pub vl_thickness: u32,
+    pub vl_step: i32,
 }
 
 impl Default for DenoiserParams {
@@ -39,6 +45,12 @@ impl Default for DenoiserParams {
             high_threshold: 150.0,
             aperture: 3,
             l2_gradient: true,
+            inpaint_radius: 3.0,
+            //
+            hl_thickness: 2,
+            hl_step: 4,
+            vl_thickness: 2,
+            vl_step: 4,
         }
     }
 }
